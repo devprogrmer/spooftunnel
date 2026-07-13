@@ -9,11 +9,11 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use clap::Parser;
 
-use SpoofTunnel::app::{run_client, run_server};
-use SpoofTunnel::check::{run_spoof_check, CheckOptions};
-use SpoofTunnel::config::{Config, TunnelRole};
-use SpoofTunnel::logging::{init_logging, log_tune_summary, print_banner};
-use SpoofTunnel::tuning::{apply_auto_tune, effective_runtime_threads};
+use spooftunnel::app::{run_client, run_server};
+use spooftunnel::check::{run_spoof_check, CheckOptions};
+use spooftunnel::config::{Config, TunnelRole};
+use spooftunnel::logging::{init_logging, log_tune_summary, print_banner};
+use spooftunnel::tuning::{apply_auto_tune, effective_runtime_threads};
 
 #[derive(Parser, Debug)]
 #[command(name = "spoof-tunnel", about = "SpoofTunnel unified client/server")]
