@@ -90,3 +90,7 @@ async fn async_main(cfg: Arc<Config>, args: Args) -> Result<()> {
 
     run_client(cfg).await
 }
+
+
+    run_client(cfg).await
+}
