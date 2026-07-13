@@ -1,1 +1,182 @@
+# SpoofTunnel – Server Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# IP Addressing
+# ─────────────────────────────────────────────────────────────────────────────
 
+# Role for unified binary (client or server).
+role = "server"
+
+# The real IPv4 address of this server.
+real_ip        = "203.0.113.1"
+
+# The real IPv4 address of the client.
+peer_real_ip   = "10.0.0.1"
+
+# The spoofed source IP the server uses in outgoing replies.
+spoofed_ip     = "1.2.3.4"
+
+# Spoofed IP pool – server can rotate among multiple addresses.
+spoofed_ip_pool = ["1.2.3.4", "5.6.7.8"]
+
+# The spoofed source IP the client uses (what we expect to receive as
+# source in incoming packets).
+peer_spoofed_ip = "8.8.4.4"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Channel Settings
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Transport protocol used for packets sent by this server.
+# Options: "udp", "icmp", "proto58", "tcp", "quic", "ipip", "gre"
+#   ipip  – IP-in-IP (protocol 4). Bare IPv4 encapsulation, no L4 header.
+#   gre   – GRE (protocol 47, RFC 2784). Minimal 4-byte GRE header before
+#           the payload. Looks like a standard VPN/GRE tunnel to DPI.
+uplink_protocol = "udp"
+
+# Transport protocol used for packets received by this server.
+# Options: "udp", "icmp", "proto58", "tcp", "quic", "ipip", "gre"
+downlink_protocol = "udp"
+
+# UDP/TCP port for the data channel.  Must match client.
+data_port = 51820
+
+# Randomize data port per packet (UDP/TCP only).
+shuffle_data_port = false
+
+# Shuffle range (used only when shuffle_data_port = true).
+shuffle_port_min = 49152
+shuffle_port_max = 65535
+
+# Mux/FEC settings (UDP/ICMP only).
+# Multiplexing batches multiple packets per wire frame – reduces syscall
+# overhead significantly under high packet rates.
+enable_multiplex = true
+# Flush the batch every 1 ms (was 2 ms) – good balance of throughput vs latency.
+multiplex_flush_ms = 1
+# Use the full MTU budget for mux frames.
+multiplex_max_payload = 1380
+enable_fec = false
+fec_group_size = 4
+
+# ICMP echo identifier.  Must match client config.
+icmp_id = 0x4321
+
+# Randomize ICMP echo identifier per packet.
+random_icmp_id = false
+
+# QUIC settings (used only when uplink/downlink are set to "quic").
+quic_server_name = "SpoofTunnel"
+quic_cert = "config/quic_cert.pem"
+quic_key = "config/quic_key.pem"
+quic_alpn = "h3"
+quic_idle_timeout_ms = 30000
+# Raised from 10 MB → 128 MB so QUIC flow control never throttles a fast link.
+quic_max_data = 134217728
+# Raised from 1 MB → 16 MB per-stream window.
+quic_max_stream_data = 16777216
+# More concurrent streams for multi-tunnel setups.
+quic_max_streams_bidi = 256
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Security
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Pre-shared key – must match client exactly.
+pre_shared_key = "change-this-to-a-random-secret-key-at-least-32-chars"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DPI Bypass Obfuscation
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Append 1..packet_padding_max random bytes after every wire frame so packet
+# length histograms cannot fingerprint the tunnel. Receiver strips automatically.
+packet_padding = false
+# Maximum padding bytes per frame (1–255).
+packet_padding_max = 64
+
+# Randomise the IPv4 TTL from a pool of realistic OS values {64, 128, 255}
+# instead of always sending 64, which is a fingerprint of non-OS raw sockets.
+ttl_jitter = false
+
+# Prefix every TCP payload with a 5-byte fake TLS Application Data record
+# header (\x17\x03\x03<len>). Shallow DPI sees TLS traffic. TCP only.
+fake_tls_header = false
+
+# Set a random plausible DSCP value in the IPv4 ToS field {0x00, 0x28, 0x10}
+# instead of always 0, which stands out on QoS-aware inspection systems.
+random_dscp = false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XOR Stream-Cipher Obfuscation
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Enable XOR-CTR stream cipher on all outgoing and incoming wire frames.
+# When true every frame is encrypted before sending and decrypted on arrival.
+# Both client and server MUST have the same setting and the same xor_key.
+# Provides traffic obfuscation / DPI evasion.
+enable_xor = false
+
+# Key for the XOR cipher (any string, any length – hashed with SHA-256).
+# If left empty, `pre_shared_key` is used automatically so you only need
+# one secret in your config.
+# xor_key = ""   # defaults to pre_shared_key when empty
+
+# Logging level: trace, debug, info, warn, error.
+log_level = "info"
+
+# Additional trusted client IPs.
+allowed_peers = []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tunnel & Performance
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Performance tuning mode: "throughput", "latency", or "balanced".
+# "throughput" – maximises raw bandwidth (best for bulk transfers).
+# "latency"    – minimises round-trip time (best for gaming/VoIP).
+# "balanced"   – good all-round default.
+perf_mode = "throughput"
+
+# Enable automatic tuning based on CPU, RAM, and NIC speed.
+# When true, tunnel_count / channel_capacity / io_channel_capacity /
+# runtime_worker_threads / mux settings are all overridden automatically.
+auto_tune = true
+
+# Number of independent parallel tunnels (overridden by auto_tune).
+tunnel_count = 4
+mtu = 1380
+
+# Per-tunnel channel capacity (higher helps absorb bursts).
+# Raised from 4096 → 8192 to handle high-throughput bursts.
+channel_capacity = 8192
+
+# Channel capacity for raw I/O and mux queues.
+# Raised from 4096 → 16384; should be at least 2× channel_capacity.
+io_channel_capacity = 16384
+
+# Tokio runtime worker threads (0 = auto).
+runtime_worker_threads = 0
+
+# Client-side port filter is ignored on the server, but the fields are required.
+forward_ports = [8080, 8443]
+forward_port = 0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Network Interface
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Network interface to bind raw sockets to.
+interface = "eth0"
+
+# TUN interface name.
+tun_name = "spoof0"
+
+# Local and peer TUN IPv4 addresses.
+tun_ip = "10.66.0.1"
+tun_peer_ip = "10.66.0.2"
+
+# Netmask for the TUN interface (point-to-point /30 by default).
+tun_netmask = "255.255.255.252"
+
+# TUN MTU (clamped to `mtu`).
+tun_mtu = 1380
