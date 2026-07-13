@@ -1,0 +1,95 @@
+[package]
+name = "spooftunnel"
+version = "4.1.0"
+edition = "2021"
+authors = ["devprogrmer"]
+description = "Bidirectional IP spoofing tunnel for heavily censored networks"
+license = "MIT"
+
+[[bin]]
+name = "client"
+path = "src/bin/client.rs"
+
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "spoof-tunnel"
+path = "src/bin/spoof-tunnel.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "io-util"] }
+async-io = "2"
+async-lock = "3"
+async-channel = "2"
+async-net = "2"
+futures-lite = "2"
+event-listener = "5"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
+
+# Fast stream cipher used for wire-level encryption (ChaCha20).
+# ~10-20x faster than SHA-256 CTR; hardware-accelerated on modern CPUs.
+chacha20 = "0.9"
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+log = "0.4"
+simplelog = "0.12"
+
+# Packet building/parsing
+pnet = "0.35"
+pnet_packet = "0.35"
+pnet_transport = "0.35"
+
+# Low-level OS interfaces
+libc = "0.2"
+
+# Randomness (for IP rotation, sequence numbers, etc.)
+rand = "0.8"
+
+# Byte manipulation
+bytes = "1"
+
+# QUIC transport (spoofed UDP)
+quiche = "0.20"
+
+# Concurrent maps
+dashmap = "6"
+
+# Lock-free shared state for hot-path reads
+arc-swap = "1"
+
+# High-performance memory allocator – reduces allocation overhead significantly
+# under heavy multi-threaded packet I/O.
+mimalloc = { version = "0.1", default-features = false }
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+
+[profile.release]
+opt-level = 3        # Maximum optimization
+lto = "fat"          # Link Time Optimization – enables cross-crate inlining
+codegen-units = 1    # Single codegen unit for best inter-procedural optimization
+panic = "abort"      # Removes panic unwinding code
+strip = true         # Strip symbols
+debug = false
+incremental = false
+
+# Emit AVX2/AVX-512/etc instructions for the machine being compiled on.
+# Build with: RUSTFLAGS="-C target-cpu=native" cargo build --release
+# (Binaries will not be portable to older CPUs.)
