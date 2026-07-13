@@ -11,10 +11,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 
-use SpoofTunnel::app::{run_server, verify_license};
-use SpoofTunnel::config::Config;
-use SpoofTunnel::logging::{init_logging, log_tune_summary, print_banner};
-use SpoofTunnel::tuning::{apply_auto_tune, effective_runtime_threads};
+use spooftunnel::app::{run_server, verify_license};
+use spooftunnel::config::Config;
+use spooftunnel::logging::{init_logging, log_tune_summary, print_banner};
+use spooftunnel::tuning::{apply_auto_tune, effective_runtime_threads};
 
 #[derive(Parser, Debug)]
 #[command(name = "server", about = "SpoofTunnel server (tunnel endpoint)")]
