@@ -1,3 +1,4 @@
+```rust
 //! SpoofTunnel unified binary (client/server).
 //!
 //! Usage:
@@ -96,3 +97,4 @@ async fn async_main(cfg: Arc<Config>, args: Args) -> Result<()> {
         _ => bail!("unknown role"),
     }
 }
+```
