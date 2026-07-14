@@ -45,6 +45,8 @@ jobs:
         with:
           files: |
             target/release/spoof-tunnel
-            target/release/spoof-manager.sh
+            target/release/client
+            target/release/server
+            scripts/spoof-manager.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
