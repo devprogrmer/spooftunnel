@@ -1,4 +1,3 @@
-```rust
 //! ChaCha20 stream cipher for SpoofTunnel wire encryption.
 //!
 //! # Why ChaCha20?
