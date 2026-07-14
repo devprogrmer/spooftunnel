@@ -1,5 +1,9 @@
 # SpoofTunnel
 
+[![Build](https://github.com/devprogrmer/spooftunnel/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/devprogrmer/spooftunnel/actions/workflows/rust.yml)
+[![Latest release](https://img.shields.io/github/v/release/devprogrmer/spooftunnel?sort=semver)](https://github.com/devprogrmer/spooftunnel/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **Bidirectional IP‑spoofing tunnel for heavily censored networks.**
 
 SpoofTunnel forwards IP packets between two hosts over a spoofed transport
@@ -18,6 +22,41 @@ jitter, fake‑TLS framing, and a XOR/ChaCha20 stream cipher for obfuscation.
 
 ---
 
+## Project status & latest release
+
+- **Current version:** `4.1.0`
+- **Latest release:** [**v4.1.0**](https://github.com/devprogrmer/spooftunnel/releases/tag/v4.1.0)
+  — prebuilt Linux x86‑64 binaries (built against glibc 2.31).
+- **CI:** both the build/test workflow and the release workflow are green.
+
+📥 **[Download the latest release »](https://github.com/devprogrmer/spooftunnel/releases/latest)**
+
+---
+
+## Download (prebuilt release)
+
+Prebuilt Linux x86‑64 binaries are attached to every `v*.*.*` release. Direct
+links for `v4.1.0`:
+
+| Asset | Description |
+| ----- | ----------- |
+| [`spoof-tunnel`](https://github.com/devprogrmer/spooftunnel/releases/download/v4.1.0/spoof-tunnel) | Unified binary (role selected via config). |
+| [`client`](https://github.com/devprogrmer/spooftunnel/releases/download/v4.1.0/client) | Client‑only binary (TUN forwarder). |
+| [`server`](https://github.com/devprogrmer/spooftunnel/releases/download/v4.1.0/server) | Server‑only binary (tunnel endpoint). |
+| [`spoof-manager.sh`](https://github.com/devprogrmer/spooftunnel/releases/download/v4.1.0/spoof-manager.sh) | Install / systemd / update helper script. |
+
+```bash
+# Example: download and prepare the unified binary
+curl -L -o spoof-tunnel \
+  https://github.com/devprogrmer/spooftunnel/releases/download/v4.1.0/spoof-tunnel
+chmod +x spoof-tunnel
+```
+
+> Binaries are built on `ubuntu-22.04` (glibc 2.31) for `x86_64-unknown-linux-gnu`.
+> On older/newer glibc or other architectures, build from source instead.
+
+---
+
 ## Features
 
 - Multiple spoofed transports: `udp`, `icmp`, `proto58`, `tcp`, `quic`,
@@ -33,19 +72,44 @@ jitter, fake‑TLS framing, and a XOR/ChaCha20 stream cipher for obfuscation.
 
 ---
 
-## Requirements
+## Requirements / dependencies
 
 - Linux (x86‑64), kernel with TUN support (`/dev/net/tun`).
-- Rust stable toolchain (2021 edition).
-- Build dependencies for the bundled QUIC stack (`quiche`/BoringSSL): `cmake`,
-  a C/C++ compiler, and `nasm` (on the CI these come with `ubuntu-22.04`).
-- Root privileges to run.
+- Root privileges (or `CAP_NET_RAW` + `CAP_NET_ADMIN`) to run.
+- **To build from source:**
+  - Rust stable toolchain (2021 edition).
+  - Build dependencies for the bundled QUIC stack (`quiche`/BoringSSL):
+    `cmake`, a C/C++ compiler, and `nasm` (on CI these come with `ubuntu-22.04`).
 
 ---
 
-## Build
+## Install from release
 
 ```bash
+# 1. Download the binary you need (unified example)
+curl -L -o spoof-tunnel \
+  https://github.com/devprogrmer/spooftunnel/releases/download/v4.1.0/spoof-tunnel
+
+# 2. Make it executable
+chmod +x spoof-tunnel
+
+# 3. (Optional) install it on PATH
+sudo install -m 0755 spoof-tunnel /usr/local/bin/spoof-tunnel
+```
+
+The `client` and `server` binaries are installed the same way. For a guided
+install with systemd units, download and run
+[`spoof-manager.sh`](https://github.com/devprogrmer/spooftunnel/releases/download/v4.1.0/spoof-manager.sh)
+(requires bash 4+, systemd, root).
+
+---
+
+## Install from source
+
+```bash
+git clone https://github.com/devprogrmer/spooftunnel.git
+cd spooftunnel
+
 # Debug build
 cargo build --bins
 
@@ -90,23 +154,31 @@ If you use the QUIC transport, provide `config/quic_cert.pem` /
 
 ---
 
-## Run
+## Usage
+
+The unified `spoof-tunnel` binary picks its role (`client` / `server`) from the
+`role` field in the TOML. The dedicated `client` and `server` binaries are
+role‑fixed entry points. All binaries share the `--config` and `--log-level`
+flags.
+
+### Client usage
 
 ```bash
-# Unified binary (role read from the TOML)
-sudo ./target/release/spoof-tunnel --config config/server.toml   # on the server
-sudo ./target/release/spoof-tunnel --config config/client.toml   # on the client
-
-# Or the dedicated binaries
-sudo ./target/release/server --config config/server.toml
 sudo ./target/release/client --config config/client.toml
 ```
 
-Override the log level at runtime with `--log-level debug`.
+| Flag                     | Default              | Description                                                    |
+| ------------------------ | -------------------- | -------------------------------------------------------------- |
+| `-c`, `--config <PATH>`  | `config/client.toml` | Path to the TOML configuration file.                           |
+| `-l`, `--log-level <LVL>`| *(from config)*      | Override log level (e.g. `debug`, `info`, `warn`).             |
+| `--check`                | off                  | Run spoofed‑IP check mode (no TUN, no tunnel forwarding).      |
+| `--check-ips <FILE>`     | *(required with `--check`)* | IP list file (one IPv4 per line) used for check mode.   |
+| `--check-out <FILE>`     | `check_latency.txt`  | Output file for check results.                                 |
+| `--check-timeout-ms <N>` | `1500`               | Timeout per IP in milliseconds.                                |
+| `--check-workers <N>`    | `64`                 | Concurrent workers for check mode.                             |
 
-### Spoofed‑IP check mode
-
-Measure which spoofed source IPs are reachable and their latency:
+**Spoofed‑IP check mode** — measure which spoofed source IPs are reachable and
+their latency:
 
 ```bash
 sudo ./target/release/client \
@@ -116,6 +188,35 @@ sudo ./target/release/client \
   --check-workers 64 --check-timeout-ms 1500
 ```
 
+### Server usage
+
+```bash
+sudo ./target/release/server --config config/server.toml
+```
+
+> On startup the `server` binary prompts for a **`License password:`** before
+> it begins forwarding.
+
+| Flag                     | Default              | Description                                          |
+| ------------------------ | -------------------- | --------------------------------------------------- |
+| `-c`, `--config <PATH>`  | `config/server.toml` | Path to the TOML configuration file.                |
+| `-l`, `--log-level <LVL>`| *(from config)*      | Override log level.                                 |
+| `--check-allow-any`      | off                  | Allow any source IP (bypass allowlist) for check mode. |
+
+### Unified binary usage
+
+```bash
+# Role is read from the TOML (`role = "client"` or `role = "server"`).
+sudo ./target/release/spoof-tunnel --config config/server.toml
+sudo ./target/release/spoof-tunnel --config config/client.toml
+```
+
+The `spoof-tunnel` binary accepts the union of the client and server flags:
+`-c/--config` (default `config/client.toml`), `-l/--log-level`, and — when the
+config role is `client` — `--check`, `--check-ips`, `--check-out`,
+`--check-timeout-ms`, `--check-workers`; when the role is `server`,
+`--check-allow-any`.
+
 ### Lifecycle management
 
 [`scripts/spoof-manager.sh`](scripts/spoof-manager.sh) provides install /
@@ -123,15 +224,40 @@ systemd service / update helpers (requires bash 4+, systemd, root).
 
 ---
 
+## Troubleshooting
+
+| Symptom | Cause / fix |
+| ------- | ----------- |
+| Fails to open a TUN device (`/dev/net/tun`) | The kernel TUN module isn't available. Ensure `/dev/net/tun` exists and the `tun` module is loaded. |
+| Permission denied binding raw sockets / creating TUN | Run as root, or grant `CAP_NET_RAW` + `CAP_NET_ADMIN` to the binary. |
+| `server` waits at `License password:` | Expected — the `server` binary prompts for a license password on startup before forwarding. |
+| `--check-ips` reported as required | `--check-ips <FILE>` is mandatory whenever `--check` is used on the client. |
+| QUIC transport fails to start | Provide `config/quic_cert.pem` and `config/quic_key.pem` (git‑ignored; never commit private keys). |
+| Build fails on the QUIC/BoringSSL step | Install the build dependencies: `cmake`, a C/C++ compiler, and `nasm`. |
+| Prebuilt binary won't run (glibc error) | Release binaries target glibc 2.31 / x86‑64. On a different glibc or arch, build from source. |
+
+---
+
+## Links
+
+- **Repository:** https://github.com/devprogrmer/spooftunnel
+- **Releases:** https://github.com/devprogrmer/spooftunnel/releases
+- **Latest release:** https://github.com/devprogrmer/spooftunnel/releases/latest
+
+---
+
 ## Continuous Integration
 
-- **`.github/workflows/rust.yml`** — builds, runs Clippy, and runs the test
-  suite on every push / PR to `main`.
-- **`.github/workflows/build-release.yml`** — builds Linux release binaries
-  and publishes them to a GitHub Release when a `v*.*.*` tag is pushed.
+- **[`.github/workflows/rust.yml`](.github/workflows/rust.yml)** — builds, runs
+  Clippy, and runs the test suite on every push / PR to `main`.
+- **[`.github/workflows/build-release.yml`](.github/workflows/build-release.yml)**
+  — builds Linux release binaries and publishes them to a GitHub Release when a
+  `v*.*.*` tag is pushed.
+
+Both workflows are currently green.
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Copyright © 2026 devprogrmer.
