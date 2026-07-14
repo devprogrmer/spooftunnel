@@ -21,7 +21,6 @@ pub mod packet;
 pub mod port_forward;
 pub mod quic;
 pub mod raw_socket;
-pub mod socks5;
 pub mod tun;
 pub mod tun_bridge;
 pub mod tuning;
