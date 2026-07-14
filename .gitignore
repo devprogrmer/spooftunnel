@@ -1,2 +1,21 @@
-target
+# Rust build artifacts
+/target
+
+# Cargo lockfile is intentionally not committed for this project (see README).
 Cargo.lock
+
+# Runtime-generated files
+check_latency.txt
+check_ips.txt
+
+# TLS material for the QUIC transport (never commit private keys)
+config/quic_key.pem
+config/quic_cert.pem
+*.pem
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
