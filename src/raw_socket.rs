@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use async_channel as mpsc;
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use pnet_packet::icmp::{
     echo_request::MutableEchoRequestPacket, IcmpCode, IcmpPacket, IcmpTypes,
 };
@@ -795,4 +795,615 @@ fn fill_ipv4_header(
     pkt.set_checksum(0);
     let cksum = pnet_packet::ipv4::checksum(&pkt.to_immutable());
     pkt.set_checksum(cksum);
+}
+
+// ── Wire packet builders ──────────────────────────────────────────────────────
+//
+// Each builder returns a full IPv4 packet (header included) ready to be handed
+// to `patch_ip_header` and `raw_sendto`. The outer IPv4 header is assembled by
+// the shared `fill_ipv4_header` helper; the L4 header and checksum are filled in
+// here.
+
+fn build_udp_packet(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    sport: u16,
+    dport: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    let total = IP_HDR_LEN + UDP_HDR_LEN + payload.len();
+    let mut buf = vec![0u8; total];
+    fill_ipv4_header(
+        &mut buf[..IP_HDR_LEN],
+        src,
+        dst,
+        IpNextHeaderProtocols::Udp,
+        total,
+    );
+    {
+        let mut udp = MutableUdpPacket::new(&mut buf[IP_HDR_LEN..]).unwrap();
+        udp.set_source(sport);
+        udp.set_destination(dport);
+        udp.set_length((UDP_HDR_LEN + payload.len()) as u16);
+        udp.set_payload(payload);
+        udp.set_checksum(0);
+        let cksum = pnet_packet::udp::ipv4_checksum(&udp.to_immutable(), &src, &dst);
+        udp.set_checksum(cksum);
+    }
+    buf
+}
+
+fn build_icmp_echo(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    id: u16,
+    seq: u16,
+    payload: &[u8],
+    reply: bool,
+) -> Vec<u8> {
+    let total = IP_HDR_LEN + ICMP_ECHO_HDR_LEN + payload.len();
+    let mut buf = vec![0u8; total];
+    fill_ipv4_header(
+        &mut buf[..IP_HDR_LEN],
+        src,
+        dst,
+        IpNextHeaderProtocols::Icmp,
+        total,
+    );
+    {
+        let mut echo = MutableEchoRequestPacket::new(&mut buf[IP_HDR_LEN..]).unwrap();
+        echo.set_icmp_type(if reply {
+            IcmpTypes::EchoReply
+        } else {
+            IcmpTypes::EchoRequest
+        });
+        echo.set_icmp_code(IcmpCode::new(0));
+        echo.set_identifier(id);
+        echo.set_sequence_number(seq);
+        echo.set_payload(payload);
+    }
+    // Checksum spans the whole ICMP message (header + payload).
+    {
+        let mut icmp = pnet_packet::icmp::MutableIcmpPacket::new(&mut buf[IP_HDR_LEN..]).unwrap();
+        icmp.set_checksum(0);
+        let cksum = pnet_packet::icmp::checksum(&IcmpPacket::new(icmp.packet()).unwrap());
+        icmp.set_checksum(cksum);
+    }
+    buf
+}
+
+fn build_proto58_packet(src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
+    let total = IP_HDR_LEN + payload.len();
+    let mut buf = vec![0u8; total];
+    let proto = pnet_packet::ip::IpNextHeaderProtocol::new(58);
+    fill_ipv4_header(&mut buf[..IP_HDR_LEN], src, dst, proto, total);
+    buf[IP_HDR_LEN..].copy_from_slice(payload);
+    buf
+}
+
+fn build_ipip_packet(src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
+    let total = IP_HDR_LEN + payload.len();
+    let mut buf = vec![0u8; total];
+    // Protocol 4 = IP-in-IP. The payload is the inner packet with no L4 header.
+    let proto = pnet_packet::ip::IpNextHeaderProtocol::new(4);
+    fill_ipv4_header(&mut buf[..IP_HDR_LEN], src, dst, proto, total);
+    buf[IP_HDR_LEN..].copy_from_slice(payload);
+    buf
+}
+
+fn build_gre_packet(src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
+    let total = IP_HDR_LEN + GRE_HDR_LEN + payload.len();
+    let mut buf = vec![0u8; total];
+    // Protocol 47 = GRE (RFC 2784).
+    let proto = pnet_packet::ip::IpNextHeaderProtocol::new(47);
+    fill_ipv4_header(&mut buf[..IP_HDR_LEN], src, dst, proto, total);
+    // Minimal GRE header: 2-byte flags/version (all zero) + 2-byte protocol type.
+    buf[IP_HDR_LEN] = 0;
+    buf[IP_HDR_LEN + 1] = 0;
+    buf[IP_HDR_LEN + 2..IP_HDR_LEN + GRE_HDR_LEN].copy_from_slice(&GRE_PROTO_IPV4.to_be_bytes());
+    buf[IP_HDR_LEN + GRE_HDR_LEN..].copy_from_slice(payload);
+    buf
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_tcp_packet(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    sport: u16,
+    dport: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    payload: &[u8],
+) -> Vec<u8> {
+    let total = IP_HDR_LEN + TCP_HDR_LEN + payload.len();
+    let mut buf = vec![0u8; total];
+    fill_ipv4_header(
+        &mut buf[..IP_HDR_LEN],
+        src,
+        dst,
+        IpNextHeaderProtocols::Tcp,
+        total,
+    );
+    {
+        let mut tcp = MutableTcpPacket::new(&mut buf[IP_HDR_LEN..]).unwrap();
+        tcp.set_source(sport);
+        tcp.set_destination(dport);
+        tcp.set_sequence(seq);
+        tcp.set_acknowledgement(ack);
+        tcp.set_data_offset(5); // 20-byte header, no options.
+        tcp.set_flags(flags);
+        tcp.set_window(65535);
+        tcp.set_payload(payload);
+        tcp.set_checksum(0);
+        let cksum = pnet_packet::tcp::ipv4_checksum(&tcp.to_immutable(), &src, &dst);
+        tcp.set_checksum(cksum);
+    }
+    buf
+}
+
+// ── IPv4 header post-processing (DPI obfuscation) ─────────────────────────────
+
+/// Apply optional TTL jitter / DSCP randomisation to an already-built IPv4
+/// packet and recompute the header checksum.
+fn patch_ip_header(buf: &mut [u8], dpi: &DpiObfuscation) {
+    if !dpi.ttl_jitter && !dpi.random_dscp {
+        return;
+    }
+    let mut pkt = match MutableIpv4Packet::new(buf) {
+        Some(p) => p,
+        None => return,
+    };
+    if dpi.ttl_jitter {
+        let ttl = TTL_POOL[(rand::random::<u8>() as usize) % TTL_POOL.len()];
+        pkt.set_ttl(ttl);
+    }
+    if dpi.random_dscp {
+        // DSCP_POOL holds ToS bytes; the 6-bit DSCP field is the top 6 bits.
+        let tos = DSCP_POOL[(rand::random::<u8>() as usize) % DSCP_POOL.len()];
+        pkt.set_dscp(tos >> 2);
+    }
+    pkt.set_checksum(0);
+    let cksum = pnet_packet::ipv4::checksum(&pkt.to_immutable());
+    pkt.set_checksum(cksum);
+}
+
+// ── Raw socket send/recv syscalls ─────────────────────────────────────────────
+
+fn sockaddr_in(dst: Ipv4Addr) -> libc::sockaddr_in {
+    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    addr.sin_family = libc::AF_INET as libc::sa_family_t;
+    addr.sin_port = 0;
+    addr.sin_addr.s_addr = u32::from(dst).to_be();
+    addr
+}
+
+fn raw_sendto(fd: RawFd, buf: &[u8], dst: Ipv4Addr) -> Result<()> {
+    let addr = sockaddr_in(dst);
+    let ret = unsafe {
+        libc::sendto(
+            fd,
+            buf.as_ptr() as *const libc::c_void,
+            buf.len(),
+            0,
+            &addr as *const libc::sockaddr_in as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error()).context("sendto");
+    }
+    Ok(())
+}
+
+fn raw_recvfrom(fd: RawFd, buf: &mut [u8]) -> Result<(usize, Ipv4Addr)> {
+    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    let mut addrlen = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    let n = unsafe {
+        libc::recvfrom(
+            fd,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+            0,
+            &mut addr as *mut libc::sockaddr_in as *mut libc::sockaddr,
+            &mut addrlen,
+        )
+    };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error()).context("recvfrom");
+    }
+    let src = Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
+    Ok((n as usize, src))
+}
+
+// ── Source-IP allowlist ───────────────────────────────────────────────────────
+
+/// An empty allowlist means "accept any source" (used for `--check-allow-any`).
+fn is_allowed(src: Ipv4Addr, allowed: &[Ipv4Addr]) -> bool {
+    allowed.is_empty() || allowed.contains(&src)
+}
+
+// ── Padding / XOR / fake-TLS payload transforms ───────────────────────────────
+
+fn map_payload<F: FnOnce(Bytes) -> Bytes>(out: OutPacket, f: F) -> OutPacket {
+    match out {
+        OutPacket::Udp { src_ip, dst_ip, src_port, dst_port, payload } => OutPacket::Udp {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            payload: f(payload),
+        },
+        OutPacket::Icmp { src_ip, dst_ip, id, seq, payload } => OutPacket::Icmp {
+            src_ip,
+            dst_ip,
+            id,
+            seq,
+            payload: f(payload),
+        },
+        OutPacket::IcmpReply { src_ip, dst_ip, id, seq, payload } => OutPacket::IcmpReply {
+            src_ip,
+            dst_ip,
+            id,
+            seq,
+            payload: f(payload),
+        },
+        OutPacket::Proto58 { src_ip, dst_ip, payload } => OutPacket::Proto58 {
+            src_ip,
+            dst_ip,
+            payload: f(payload),
+        },
+        OutPacket::Ipip { src_ip, dst_ip, payload } => OutPacket::Ipip {
+            src_ip,
+            dst_ip,
+            payload: f(payload),
+        },
+        OutPacket::Gre { src_ip, dst_ip, payload } => OutPacket::Gre {
+            src_ip,
+            dst_ip,
+            payload: f(payload),
+        },
+        OutPacket::Tcp {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            seq,
+            ack,
+            flags,
+            payload,
+        } => OutPacket::Tcp {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            seq,
+            ack,
+            flags,
+            payload: f(payload),
+        },
+    }
+}
+
+/// Append `1..=max` random bytes, with the final byte encoding the pad length.
+/// Reversed by [`strip_padding`] on the receiver.
+fn apply_padding(out: OutPacket, max: u8) -> OutPacket {
+    map_payload(out, |p| {
+        let max = max.max(1);
+        let pad_len = (rand::random::<u8>() % max) as usize + 1; // 1..=max
+        let mut b = BytesMut::with_capacity(p.len() + pad_len);
+        b.put_slice(&p);
+        for _ in 0..pad_len - 1 {
+            b.put_u8(rand::random::<u8>());
+        }
+        b.put_u8(pad_len as u8);
+        b.freeze()
+    })
+}
+
+/// Reverse [`apply_padding`]. Returns `None` if the trailer is malformed.
+fn strip_padding(payload: Bytes) -> Option<Bytes> {
+    if payload.is_empty() {
+        return None;
+    }
+    let pad_len = *payload.last().unwrap() as usize;
+    if pad_len == 0 || pad_len > payload.len() {
+        return None;
+    }
+    Some(payload.slice(0..payload.len() - pad_len))
+}
+
+fn encrypt_out_packet(out: OutPacket, cipher: &XorCipher) -> OutPacket {
+    map_payload(out, |p| cipher.encrypt(&p))
+}
+
+/// Prefix a TCP payload with a 5-byte fake TLS Application-Data record header.
+/// Non-TCP packets are returned unchanged.
+fn apply_fake_tls(out: OutPacket) -> OutPacket {
+    match out {
+        OutPacket::Tcp {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            seq,
+            ack,
+            flags,
+            payload,
+        } => {
+            let mut b = BytesMut::with_capacity(5 + payload.len());
+            b.put_u8(TLS_RECORD_TYPE);
+            b.put_slice(&TLS_VERSION);
+            b.put_u16(payload.len() as u16);
+            b.put_slice(&payload);
+            OutPacket::Tcp {
+                src_ip,
+                dst_ip,
+                src_port,
+                dst_port,
+                seq,
+                ack,
+                flags,
+                payload: b.freeze(),
+            }
+        }
+        other => other,
+    }
+}
+
+// ── Shared receive-path helpers ───────────────────────────────────────────────
+
+/// XOR-decrypt (if enabled) then strip padding (if enabled). Returns the
+/// recovered SpoofTunnel frame, or `None` if either step fails.
+fn deobfuscate(raw: Bytes, xor: Option<&XorCipher>, padding: bool) -> Option<Bytes> {
+    let p = match xor {
+        Some(c) => c.decrypt(raw)?,
+        None => raw,
+    };
+    if padding {
+        strip_padding(p)
+    } else {
+        Some(p)
+    }
+}
+
+/// Decode a recovered frame (mux/FEC or a bare SpoofPacket) and forward it.
+fn deliver(
+    payload: Bytes,
+    src_ip: Ipv4Addr,
+    mux_fec: &MuxFecConfig,
+    fec_state: &mut Option<FecDecoder>,
+    tx: &mpsc::Sender<InPacket>,
+) {
+    if mux_fec.is_enabled() {
+        match decode_payload(payload) {
+            Ok(frame) => match decode_packets_from_frame(frame, fec_state.as_mut()) {
+                Ok(pkts) => {
+                    for pkt in pkts {
+                        let _ = tx.send_blocking(InPacket { src_ip, pkt });
+                    }
+                }
+                Err(e) => log::trace!("mux decode: {}", e),
+            },
+            Err(e) => log::trace!("mux frame: {}", e),
+        }
+    } else {
+        match SpoofPacket::decode(payload) {
+            Ok(pkt) => {
+                let _ = tx.send_blocking(InPacket { src_ip, pkt });
+            }
+            Err(e) => log::trace!("decode: {}", e),
+        }
+    }
+}
+
+// ── Additional protocol receive loops ─────────────────────────────────────────
+
+/// Receive loop for a raw-IP transport whose payload sits immediately after the
+/// IPv4 header (protocol 58 and IP-in-IP).
+fn raw_ip_recv_loop(
+    name: &str,
+    fd: RawFd,
+    allowed: &[Ipv4Addr],
+    tx: mpsc::Sender<InPacket>,
+    mux_fec: MuxFecConfig,
+    xor: Option<&XorCipher>,
+    padding: bool,
+) {
+    let mut buf = vec![0u8; 65535];
+    let mut fec_state = if mux_fec.enable_fec {
+        Some(FecDecoder::new())
+    } else {
+        None
+    };
+    loop {
+        let (n, src_ip) = match raw_recvfrom(fd, &mut buf) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("{} recvfrom: {}", name, e);
+                continue;
+            }
+        };
+        let data = &buf[..n];
+        if data.len() < IP_HDR_LEN || !is_allowed(src_ip, allowed) {
+            continue;
+        }
+        let ihl = ((data[0] & 0x0f) as usize) * 4;
+        if data.len() < ihl {
+            continue;
+        }
+        let raw_payload = Bytes::copy_from_slice(&data[ihl..]);
+        let payload = match deobfuscate(raw_payload, xor, padding) {
+            Some(p) => p,
+            None => continue,
+        };
+        deliver(payload, src_ip, &mux_fec, &mut fec_state, &tx);
+    }
+}
+
+fn proto58_recv_loop(
+    fd: RawFd,
+    allowed: &[Ipv4Addr],
+    tx: mpsc::Sender<InPacket>,
+    mux_fec: MuxFecConfig,
+    xor: Option<&XorCipher>,
+    padding: bool,
+) {
+    raw_ip_recv_loop("proto58", fd, allowed, tx, mux_fec, xor, padding);
+}
+
+fn ipip_recv_loop(
+    fd: RawFd,
+    allowed: &[Ipv4Addr],
+    tx: mpsc::Sender<InPacket>,
+    mux_fec: MuxFecConfig,
+    xor: Option<&XorCipher>,
+    padding: bool,
+) {
+    raw_ip_recv_loop("ipip", fd, allowed, tx, mux_fec, xor, padding);
+}
+
+fn gre_recv_loop(
+    fd: RawFd,
+    allowed: &[Ipv4Addr],
+    tx: mpsc::Sender<InPacket>,
+    mux_fec: MuxFecConfig,
+    xor: Option<&XorCipher>,
+    padding: bool,
+) {
+    let mut buf = vec![0u8; 65535];
+    let mut fec_state = if mux_fec.enable_fec {
+        Some(FecDecoder::new())
+    } else {
+        None
+    };
+    loop {
+        let (n, src_ip) = match raw_recvfrom(fd, &mut buf) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("gre recvfrom: {}", e);
+                continue;
+            }
+        };
+        let data = &buf[..n];
+        if data.len() < IP_HDR_LEN || !is_allowed(src_ip, allowed) {
+            continue;
+        }
+        let ihl = ((data[0] & 0x0f) as usize) * 4;
+        if data.len() < ihl + GRE_HDR_LEN {
+            continue;
+        }
+        // Skip the 4-byte GRE header before the SpoofTunnel frame.
+        let raw_payload = Bytes::copy_from_slice(&data[ihl + GRE_HDR_LEN..]);
+        let payload = match deobfuscate(raw_payload, xor, padding) {
+            Some(p) => p,
+            None => continue,
+        };
+        deliver(payload, src_ip, &mux_fec, &mut fec_state, &tx);
+    }
+}
+
+fn tcp_recv_loop(
+    fd: RawFd,
+    port_filter: PortFilter,
+    allowed: &[Ipv4Addr],
+    tx: mpsc::Sender<InPacket>,
+    xor: Option<&XorCipher>,
+    padding: bool,
+    fake_tls: bool,
+) {
+    let mut buf = vec![0u8; 65535];
+    loop {
+        let (n, src_ip) = match raw_recvfrom(fd, &mut buf) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("tcp recvfrom: {}", e);
+                continue;
+            }
+        };
+        let data = &buf[..n];
+        if data.len() < IP_HDR_LEN || !is_allowed(src_ip, allowed) {
+            continue;
+        }
+        let ihl = ((data[0] & 0x0f) as usize) * 4;
+        if data.len() < ihl + TCP_HDR_LEN {
+            continue;
+        }
+        let tcp = &data[ihl..];
+        let dst_port = u16::from_be_bytes([tcp[2], tcp[3]]);
+        if !port_filter.matches(dst_port) {
+            continue;
+        }
+        let data_off = ((tcp[12] >> 4) as usize) * 4;
+        if data_off < TCP_HDR_LEN || tcp.len() < data_off {
+            continue;
+        }
+        let mut payload = Bytes::copy_from_slice(&tcp[data_off..]);
+        payload = match xor {
+            Some(c) => match c.decrypt(payload) {
+                Some(p) => p,
+                None => continue,
+            },
+            None => payload,
+        };
+        if padding {
+            payload = match strip_padding(payload) {
+                Some(p) => p,
+                None => continue,
+            };
+        }
+        if fake_tls {
+            if payload.len() < 5 {
+                continue;
+            }
+            payload = payload.slice(5..);
+        }
+        match SpoofPacket::decode(payload) {
+            Ok(pkt) => {
+                let _ = tx.send_blocking(InPacket { src_ip, pkt });
+            }
+            Err(e) => log::trace!("tcp decode: {}", e),
+        }
+    }
+}
+
+/// Receive loop for [`RawUdpReceiver`]: extracts raw UDP payloads without
+/// SpoofPacket decoding or de-obfuscation.
+fn udp_payload_loop(
+    fd: RawFd,
+    port_filter: PortFilter,
+    allowed: &[Ipv4Addr],
+    tx: mpsc::Sender<UdpDatagram>,
+) {
+    let mut buf = vec![0u8; 65535];
+    loop {
+        let (n, src_ip) = match raw_recvfrom(fd, &mut buf) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("udp-raw recvfrom: {}", e);
+                continue;
+            }
+        };
+        let data = &buf[..n];
+        if data.len() < IP_HDR_LEN || !is_allowed(src_ip, allowed) {
+            continue;
+        }
+        let ihl = ((data[0] & 0x0f) as usize) * 4;
+        if data.len() < ihl + UDP_HDR_LEN {
+            continue;
+        }
+        let udp = &data[ihl..];
+        let src_port = u16::from_be_bytes([udp[0], udp[1]]);
+        let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+        if !port_filter.matches(dst_port) {
+            continue;
+        }
+        let payload = Bytes::copy_from_slice(&udp[UDP_HDR_LEN..]);
+        let _ = tx.send_blocking(UdpDatagram {
+            src_ip,
+            src_port,
+            dst_port,
+            payload,
+        });
+    }
 }
