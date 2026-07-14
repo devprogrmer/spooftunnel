@@ -83,6 +83,40 @@ chmod +x spoof-tunnel
 
 ---
 
+## Quick install
+
+One‑command setup for **Linux x86‑64** users. Both options fetch the **latest
+published release** automatically.
+
+### Option 1: install the latest unified binary
+
+```bash
+curl -fsSL -o spoof-tunnel \
+  https://github.com/devprogrmer/spooftunnel/releases/latest/download/spoof-tunnel
+chmod +x spoof-tunnel
+sudo install -m 0755 spoof-tunnel /usr/local/bin/spoof-tunnel
+```
+
+Now `spoof-tunnel` is on your `PATH`:
+
+```bash
+sudo spoof-tunnel --config config/client.toml
+```
+
+### Option 2: guided install with `spoof-manager.sh`
+
+Use the manager script for a guided install and systemd service management
+(requires bash 4+, systemd, root):
+
+```bash
+curl -fsSL -o spoof-manager.sh \
+  https://github.com/devprogrmer/spooftunnel/releases/latest/download/spoof-manager.sh
+chmod +x spoof-manager.sh
+sudo ./spoof-manager.sh
+```
+
+---
+
 ## Install from release
 
 ```bash
