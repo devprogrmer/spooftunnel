@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SpoofTunnel Manager  ─  Full lifecycle management script
-#  Version: 2.1.0
+#  Version: 4.1.0
 #  Requires: bash 4+, systemd, curl/wget, root or sudo
 # ═══════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -34,7 +34,7 @@ banner()  {
  ___) | |_) | (_) | (_) |  _|  | | | |_| | | | | | | |  __/ |
 |____/| .__/ \___/ \___/|_|    |_|  \__,_|_| |_|_| |_|\___|_|
       |_|
-                                     Manager v2.1.0
+                                     Manager v4.1.0
 BANNER
   echo -e "${RESET}"
 }
@@ -85,12 +85,15 @@ get_latest_version() {
 }
 
 get_download_url() {
-  # Returns the URL for spooftunnel-linux-x86_64 asset in the latest release
+  # Returns the download URL for the "spoof-tunnel" binary asset in the latest
+  # release. The release publishes bare binaries (spoof-tunnel, client, server)
+  # plus spoof-manager.sh — so anchor on a URL ending in exactly "/spoof-tunnel"
+  # to avoid matching spoof-manager.sh or any future spoof-tunnel-* asset.
   curl -fsSL "$GITHUB_API" 2>/dev/null \
     | grep '"browser_download_url"' \
-    | grep 'spooftunnel-linux-x86_64' \
-    | head -1 \
-    | sed -E 's/.*"browser_download_url": *"([^"]+)".*/\1/'
+    | sed -E 's/.*"browser_download_url": *"([^"]+)".*/\1/' \
+    | grep -E '/spoof-tunnel$' \
+    | head -1
 }
 
 cmd_download() {
@@ -109,7 +112,7 @@ cmd_download() {
   local url
   url=$(get_download_url)
   if [[ -z "$url" ]]; then
-    err "Could not find spooftunnel-linux-x86_64 asset in release ${version}."
+    err "Could not find the 'spoof-tunnel' binary asset in release ${version}."
     exit 1
   fi
   info "Download URL: ${DIM}${url}${RESET}"
@@ -248,6 +251,9 @@ build_toml_int_array() {
 }
 
 cmd_configure() {
+  # Optional preset role: "client" | "server" preselect the role and skip the
+  # role prompt; "unified" (or empty) lets the user choose interactively.
+  local preset_role="${1:-}"
   require_root
   mkdir -p "$CONFIG_DIR" "$LOG_DIR"
 
@@ -276,7 +282,16 @@ cmd_configure() {
   echo ""
   echo -e "${BOLD}${WHITE}  ═══ [1/11] Role ════════════════════════════════════════${RESET}"
   local role
-  ask_choice role "Role for this instance" "client server" "client"
+  case "$preset_role" in
+    client|server)
+      role="$preset_role"
+      echo -e "  ${GREEN}Role preset to:${RESET} ${BOLD}${role}${RESET} ${DIM}(from installer selection)${RESET}"
+      ;;
+    *)
+      # "unified" or unspecified -> let the user choose the role to generate.
+      ask_choice role "Role for this instance" "client server" "client"
+      ;;
+  esac
 
   # ╔══════════════════════════════════════════════════════════════════════════╗
   # ║  2. SPOOFING MODE                                                       ║
@@ -839,25 +854,109 @@ cmd_uninstall() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Full guided installer flow
+# ─────────────────────────────────────────────────────────────────────────────
+#  setup = dependency check -> download/install latest binary -> configuration
+#  wizard -> (the wizard then offers to create/enable/start the systemd service).
+#  Optional preset role: client | server | unified.
+cmd_setup() {
+  local preset_role="${1:-}"
+  require_root
+  step "Guided setup${preset_role:+ (${preset_role})} — dependency check"
+  check_deps
+  cmd_download
+  echo ""
+  cmd_configure "$preset_role"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Interactive menu (shown when the script is run with no arguments)
+# ─────────────────────────────────────────────────────────────────────────────
+_prompt_instance() {
+  # Echoes an instance name read from the user (default: spoof0)
+  local reply
+  read -rp "  Instance name [spoof0]: " reply
+  echo "${reply:-spoof0}"
+}
+
+interactive_menu() {
+  banner
+  echo -e "${BOLD}${WHITE}  ═══ SpoofTunnel Installer ═══${RESET}\n"
+  echo -e "   ${GREEN}1)${RESET} Client setup            ${DIM}(install + configure client)${RESET}"
+  echo -e "   ${GREEN}2)${RESET} Server setup            ${DIM}(install + configure server)${RESET}"
+  echo -e "   ${GREEN}3)${RESET} Unified setup           ${DIM}(install + choose role)${RESET}"
+  echo -e "   ${GREEN}4)${RESET} Download only           ${DIM}(fetch/refresh binary)${RESET}"
+  echo -e "   ${GREEN}5)${RESET} Configure existing install"
+  echo -e "   ${GREEN}6)${RESET} Start service"
+  echo -e "   ${GREEN}7)${RESET} Stop service"
+  echo -e "   ${GREEN}8)${RESET} Status"
+  echo -e "   ${GREEN}9)${RESET} Logs"
+  echo -e "  ${GREEN}10)${RESET} Uninstall"
+  echo -e "  ${GREEN}11)${RESET} Exit"
+  echo ""
+  local choice
+  read -rp "  Select an option [1-11]: " choice
+  echo ""
+  case "$choice" in
+    1)  cmd_setup client ;;
+    2)  cmd_setup server ;;
+    3)  cmd_setup unified ;;
+    4)  check_deps; cmd_download ;;
+    5)  cmd_configure ;;
+    6)  cmd_start "$(_prompt_instance)" ;;
+    7)  cmd_stop "$(_prompt_instance)" ;;
+    8)  cmd_status ;;
+    9)  cmd_logs "$(_prompt_instance)" ;;
+    10) cmd_uninstall ;;
+    11) info "Bye."; exit 0 ;;
+    *)  err "Invalid selection: ${choice:-<empty>}"; exit 1 ;;
+  esac
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Main Entrypoint
 # ─────────────────────────────────────────────────────────────────────────────
+usage() {
+  echo "Usage: $0 [command] [arg]"
+  echo ""
+  echo "Commands:"
+  echo "  (no args)            Open the interactive installer menu"
+  echo "  setup [role]         Full guided install: deps + download + configure + service"
+  echo "                       Optional role: client | server | unified"
+  echo "  download             Download/install the latest binary only"
+  echo "  configure [role]     Run the configuration wizard only"
+  echo "                       Optional role: client | server | unified"
+  echo "  start   <instance>   Start a service instance"
+  echo "  stop    <instance>   Stop a service instance"
+  echo "  restart <instance>   Restart a service instance"
+  echo "  status  [instance]   Show service status"
+  echo "  logs    <instance>   Show last 100 log lines"
+  echo "  follow  <instance>   Follow logs live"
+  echo "  uninstall            Remove binary, services, configs and logs"
+}
+
 main() {
+  # No arguments -> interactive menu (the primary installer UX).
   if [[ $# -lt 1 ]]; then
-    banner
-    echo "Usage: $0 {setup|download|configure|start|stop|restart|status|logs|follow|uninstall} [instance_name]"
-    exit 1
+    interactive_menu
+    exit 0
   fi
 
   local action="$1"
   shift || true
 
   case "$action" in
-    setup|download)
+    setup)
+      # Optional role preset: setup [client|server|unified]
+      cmd_setup "${1:-}"
+      ;;
+    download)
       check_deps
       cmd_download
       ;;
     configure)
-      cmd_configure
+      # Optional role preset: configure [client|server|unified]
+      cmd_configure "${1:-}"
       ;;
     start)
       if [[ $# -lt 1 ]]; then err "Missing instance name"; exit 1; fi
@@ -885,9 +984,12 @@ main() {
     uninstall)
       cmd_uninstall
       ;;
+    -h|--help|help)
+      usage
+      ;;
     *)
       err "Unknown command: $action"
-      echo "Usage: $0 {setup|download|configure|start|stop|restart|status|logs|follow|uninstall} [instance_name]"
+      usage
       exit 1
       ;;
   esac
